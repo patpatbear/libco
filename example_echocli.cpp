@@ -34,6 +34,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <signal.h>
+#include <sys/wait.h>
 
 using namespace std;
 struct stEndPoint
@@ -213,6 +214,8 @@ int main(int argc,char *argv[])
 
 		exit(0);
 	}
+
+    wait(NULL);
 	return 0;
 }
 /*./example_echosvr 127.0.0.1 10000 100 50*/

@@ -124,6 +124,7 @@ static void *accept_routine( void * )
 			continue;
 
 		}
+
 		struct sockaddr_in addr; //maybe sockaddr_un;
 		memset( &addr,0,sizeof(addr) );
 		socklen_t len = sizeof(addr);
