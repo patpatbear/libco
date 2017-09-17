@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <unistd.h>
 #include <sys/time.h>
 #include <stack>
 
@@ -147,6 +148,8 @@ static void *accept_routine( void * )
 		task_t *co = g_readwrite.top();
 		co->fd = fd;
 		g_readwrite.pop();
+
+        usleep(50000);
 		co_resume( co->co );
 	}
 	return 0;

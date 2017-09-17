@@ -1,9 +1,12 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 #include <arpa/inet.h>
 #include <sys/queue.h>
 #include <stdlib.h>
+#include <errno.h>
 #include "co_routine.h"
 
 /* proxy for echosvr & echocli */
@@ -13,7 +16,6 @@ struct worker {
     int                   cfd;
     int                   sfd;
     struct stCoRoutine_t  *co;
-    struct sockaddr_in    *sin;
 };
 
 TAILQ_HEAD(w_tqh, worker) wq[1];
@@ -21,6 +23,8 @@ TAILQ_HEAD(w_tqh, worker) wq[1];
 static int iSuccCnt = 0;
 static int iFailCnt = 0;
 static int iTime = 0;
+static int lfd = -1;
+
 
 void AddSuccCnt()
 {
@@ -50,29 +54,24 @@ void AddFailCnt()
 int co_accept(int fd, struct sockaddr *addr, socklen_t *len );
 static void *accept_routine(void *arg)
 {
-    int lfd, cfd;
-    int reuse;
+    int cfd;
     struct pollfd pfd;
-    struct sockaddr *sa = (struct sockaddr*)arg;
     struct worker *w;
 
-    lfd = socket(AF_INET, SOCK_STREAM, 0);
-    reuse = 1;
-    setsockopt(lfd,SOL_SOCKET,SO_REUSEADDR,&reuse,sizeof(reuse));
-    bind(lfd, sa, sizeof(struct sockaddr_in));
-    listen(lfd, 500);
+    co_enable_hook_sys();
 
     for (;;) {
-        cfd = co_accept(lfd, NULL, NULL); //为什么要co_accept? 为啥不直接accept？
+        cfd = co_accept(lfd, NULL, NULL);
         if (cfd < 0) {
             pfd.fd = lfd;
             pfd.events = (POLLIN|POLLERR|POLLHUP);
             pfd.revents = 0;
-            co_poll(co_get_epoll_ct(), &pfd, 1, 1000);
             printf("accepting.\n");
+            co_poll(co_get_epoll_ct(), &pfd, 1, -1);
             continue;
         }
         printf("accepted\n");
+        usleep(5000);
 
         w = wq->tqh_first;
         if (w) {
@@ -80,73 +79,114 @@ static void *accept_routine(void *arg)
             TAILQ_REMOVE(wq, w, w_tqe);
             co_resume(w->co);
         } else {
+            printf("no worker\n");
             AddFailCnt();
             close(cfd);
+            cfd = -1;
         }
     }
 
     return NULL;
 }
 
+static int pre_connect_svr(struct sockaddr_in *sin)
+{
+    int sfd, ret;
+
+    sfd = socket(AF_INET, SOCK_STREAM, 0);
+    ret = connect(sfd, (struct sockaddr*)sin, sizeof(struct sockaddr_in));
+    if (ret != 0) {
+        printf("pre_connect_svr fail \n");
+        close(sfd);
+    }
+    return sfd;
+}
+
 static void *proxy_routine(void *arg)
 {
-    int nr, nw, sfd, ret;
+    int nr, nw;
     char buf[1024];
     struct worker *w;
 
     w = (struct worker*)arg;
 
+    co_enable_hook_sys();
+
     for (;;) {
-        if (w->sfd < 0) {
-            sfd = socket(AF_INET, SOCK_STREAM, 0);
-            ret = connect(sfd, (struct sockaddr*)w->sin, sizeof(struct sockaddr_in));
-            if (ret != 0) {
-                printf("connect svr fail\n");
-                close(sfd);
-                if (w->cfd >= 0) {
-                    printf("client conn closed\n");
-                    close(w->cfd);
-                }
-                w->cfd = w->sfd = -1;
-                TAILQ_INSERT_HEAD(wq, w, w_tqe);
-
-                co_yield_ct();
-                continue;
-            }
-
-            printf("connect svr suc\n");
-            w->sfd = sfd;
+        if (w->sfd < 0 || w->cfd < 0) {
+            printf("proxy PANIC! \n");
+            TAILQ_INSERT_HEAD(wq, w, w_tqe);
+            co_yield_ct();
+            continue;
         }
 
         nr = read(w->cfd, buf, sizeof(buf));
-        printf("read client\n");
+        if (nr <= 0) {
+            printf("client closed\n");
+            close(w->cfd), w->cfd = -1;
+            TAILQ_INSERT_HEAD(wq, w, w_tqe);
+            co_yield_ct();
+            continue;
+        }
+        //printf("c->p\n");
+
         nw = write(w->sfd, buf, nr);
-        printf("write svr\n");
+        if (nw <= 0) {
+            printf("svr closed, co exit\n");
+            close(w->cfd), w->cfd = -1;
+            close(w->sfd), w->sfd = -1;
+            break;
+        }
+        //printf("p->s\n");
+
         nr = read(w->sfd, buf, sizeof(buf));
-        printf("read svr \n");
+        if (nr <= 0) {
+            printf("svr closed, co exit\n");
+            close(w->cfd), w->cfd = -1;
+            close(w->sfd), w->sfd = -1;
+            break;
+        }
+        //printf("p<-s\n");
+
         nw = write(w->cfd, buf, nr);
-        printf("write client\n");
+        if (nw <= 0) {
+            printf("client closed\n");
+            close(w->cfd), w->cfd = -1;
+            TAILQ_INSERT_HEAD(wq, w, w_tqe);
+            co_yield_ct();
+            continue;
+        }
+        //printf("c<-p\n");
     }
 
     (void)nw;
     return NULL;
 }
 
+static void *dummy_routine(void *arg)
+{
+    printf("dummy\n");
+    return NULL;
+}
 
 int main(int argc, char *argv[])
 {
-    int i, nco, lport, sport;
+    int i, nco, lport, sport, nproc;
+    pid_t pid;
+    int flags;
+    int reuse = 1;
     struct sockaddr_in sinl, sins;
     struct stCoRoutine_t *co;
     struct worker *ws;
 
-    if (argc != 6) {
+    if (argc != 7) {
         fprintf(stderr, "Usage: %s <listen_ip> <listen_port> "
-                "<svr_ip> <svr_port> <nco>\n", argv[0]);
+                "<svr_ip> <svr_port> <nco> <nproc>\n", argv[0]);
         return -1;
     }
 
     nco                  = atoi(argv[5]);
+    nproc                = atoi(argv[6]);
     lport                = atoi(argv[2]);
     sinl.sin_family      = AF_INET;
     sinl.sin_port        = htons(lport);
@@ -157,27 +197,63 @@ int main(int argc, char *argv[])
     sins.sin_port        = htons(sport);
     sins.sin_addr.s_addr = inet_addr(argv[3]);
 
-    //accept_routine(&sinl);
+    TAILQ_INIT(wq);
 
+    /* enable main co, otherwise enable_hook_sys would not work */
+    co_create(&co, NULL, dummy_routine, NULL);
+    
     co_enable_hook_sys();
 
-    TAILQ_INIT(wq);
+    /* listen */
+    lfd = socket(AF_INET, SOCK_STREAM, 0);
+    flags = fcntl(lfd, F_GETFL);
+    if (!(flags & O_NONBLOCK)) {
+        printf("what the fuck! blocked lfd\n");
+    }
+
+    if (lfd < 0) {
+        printf("socket create error \n");
+        return -1;
+    }
+    setsockopt(lfd,SOL_SOCKET,SO_REUSEADDR,&reuse,sizeof(reuse));
+    if(bind(lfd, (struct sockaddr*)&sinl, sizeof(struct sockaddr_in))) perror("bind");
+    if(listen(lfd, 500)) perror("listen");
+
 
     ws = (struct worker*)calloc(nco, sizeof(struct worker));
 
-    co_create(&co, NULL, accept_routine, &sinl);
-    co_resume(co);
+    for (i = 0; i < nproc; ++i) {
+        pid = fork();
+        if (pid > 0) {
+            printf("forked %d\n", pid);
+            continue;
+        } else if (pid < 0) break;
 
-    for (i = 0; i < nco; ++i) {
-        ws[i].cfd = -1;
-        ws[i].sfd = -1;
-        ws[i].sin = &sins;
-        co_create(&ws[i].co, NULL, proxy_routine, &ws[i]);
-        //co_resume(ws[i].co);
-        TAILQ_INSERT_HEAD(wq, &ws[i], w_tqe);
+        /* pre connect svr */
+        for (i = 0; i < nco; ++i) {
+            ws[i].cfd = -1;
+            ws[i].sfd = pre_connect_svr(&sins);
+        }
+
+        printf("pre connect done\n");
+
+        /* create (but not resume) proxy_routine */
+        for (i = 0; i < nco; ++i) {
+            if (ws[i].sfd < 0) {
+                printf("co create error %d\n", i);
+                continue;
+            }
+            co_create(&ws[i].co, NULL, proxy_routine, &ws[i]);
+            TAILQ_INSERT_HEAD(wq, &ws[i], w_tqe);
+        }
+
+        /* create & resume accept routine, enable hook from now on */
+        co_create(&co, NULL, accept_routine, &sinl);
+        co_resume(co);
+
+        co_eventloop(co_get_epoll_ct(), 0, 0);
     }
 
-
-    co_eventloop(co_get_epoll_ct(), 0, 0);
+    wait(NULL);
 }
 

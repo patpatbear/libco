@@ -84,3 +84,18 @@ clean:
 	$(CLEAN) *.o $(PROGS)
 	rm -fr MANIFEST lib solib libco-$(version).src.tar.gz libco-$(version)
 
+OPT=/home/srzhao/myapps
+EVENT = -I$(OPT)/include -L$(OPT)/lib -levent
+
+EVFLAGS = -g -fno-strict-aliasing -O2 -Wall -Wall -pipe -D_GNU_SOURCE -Wno-deprecated -m64
+
+ev: ev_echocli ev_echosvr ev_proxy
+
+ev_echocli: ev_echocli.c
+	gcc $^ $(EVENT) $(EVFLAGS)  -o $@
+	
+ev_echosvr: ev_echocli.c
+	gcc $^ $(EVENT) $(EVFLAGS) -o $@ 
+
+ev_proxy: ev_proxy.c
+	gcc $^ $(EVENT) $(EVFLAGS) -o $@ 
