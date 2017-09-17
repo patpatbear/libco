@@ -10,6 +10,8 @@
 #include <string.h>
 #include <errno.h>
 
+
+
 static int iSuccCnt = 0;
 static int iFailCnt = 0;
 static int iTime = 0;
@@ -59,15 +61,27 @@ static int setnonblock(int fd)
     return 0;
 }
 
-void read_write_cb(int fd, short event, void *arg)
+static int gid = 0;
+
+struct rwarg {
+    struct event *evr;
+    struct event *evw;
+    int cnt;
+    char buf[1024];
+    int id;
+};
+
+void read_cb(int fd, short event, void *arg)
 {
-    int ret = 0;
-    struct event *ev = arg;
-	char buf[ 1024 * 16 ];
+    int ret = 0, cnt = 0;
+    struct rwarg *rw = arg;
 
     if (event & EV_READ) {
         for (;;) {
-            ret = read(fd, buf, sizeof(buf));
+            ret = read(fd, rw->buf, sizeof(rw->buf));
+
+            printf("%d: read %s", rw->id, rw->buf);
+
             if (ret < 0) {
                 if (errno == EINTR) {
                     continue;
@@ -82,25 +96,77 @@ void read_write_cb(int fd, short event, void *arg)
                 goto err;
             } else {
                 AddSuccCnt();
+                cnt++;
             }
         }
 
-        event_set
+        if (cnt > 0) {
+            rw->cnt += cnt;
+            event_add(rw->evw, NULL);
+        }
     }
 
     return ;
 
 err:
+    printf("%d: closed\n", rw->id);
     close(fd);
-    event_del(ev);
+    event_del(rw->evr);
     return ;
+}
+
+void write_cb(int fd, short event, void *arg)
+{
+    int ret, i;
+    struct rwarg *rw = arg;
+
+    if (!(event & EV_WRITE)) {
+        printf("PANIC! no write event\n");
+        return;
+    }
+
+    for (i = 0; i < rw->cnt; ++i) {
+        for (;;) {
+            ret = write(fd, rw->buf, 8);
+
+            printf("%d: write %s", rw->id, rw->buf);
+
+            if (ret < 0) {
+                if (errno == EINTR) {
+                    continue;
+                } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break;
+                } else {
+                    goto err;
+                }
+            } else if (ret == 0) {
+                printf("write return 0 \n");
+                goto err;
+            } else {
+                break;
+            }
+        }
+
+        if (ret < 0) {
+            break;
+        }
+    }
+
+    rw->cnt -= i;
+
+    return;
+
+err:
+    close(fd);
+    event_del(rw->evw);
 }
 
 void accept_cb(int fd, short event, void *arg)
 {
     int afd = -1;
-    struct event *aev, *ev;
-    aev = arg;
+    struct event *eva, *evr, *evw;
+    struct rwarg *rw;
+    eva = arg;
 
     if (event & EV_READ) {
         if (-1 == (afd = accept(fd, NULL, NULL))) {
@@ -109,15 +175,27 @@ void accept_cb(int fd, short event, void *arg)
 
         if (setnonblock(afd)) printf("setnonblock\n"); 
 
-        ev = calloc(1, sizeof(struct event));
-        event_set(ev, afd, EV_READ|EV_PERSIST, read_write_cb, &ev);
-        event_add(ev, NULL);
+        evw = calloc(1, sizeof(struct event));
+        evr = calloc(1, sizeof(struct event));
+        
+        rw = calloc(1, sizeof(struct rwarg));
+        rw->evr = evr;
+        rw->evw = evw;
+        rw->cnt = 0;
+        rw->id = gid++;
+
+        event_set(evw, afd, EV_WRITE, write_cb, rw);
+        event_set(evr, afd, EV_READ|EV_PERSIST, read_cb, rw);
+
+        event_add(rw->evr, NULL);
+
+        printf("accept fd %d suc\n", afd);
     }
 
     if (event & (~EV_READ)) {
         printf("PANIC!\n");
         close(fd);
-        event_del(aev);
+        event_del(eva);
     }
 }
 
@@ -126,6 +204,7 @@ int main(int argc, char *argv[])
     int i, fd, nproc, port;
     struct event *ev;
     pid_t pid;
+    int reuse = 1;
     struct sockaddr_in sin;
 
     if (argc != 4) {
@@ -143,7 +222,7 @@ int main(int argc, char *argv[])
     for (i = 0; i < nproc; ++i) {
         pid = fork();
         if (pid > 0) {
-            printf("forked %d \n", pid);
+            printf("forked %d\n", pid);
             continue;
         }
         if (pid < 0) {
@@ -154,6 +233,9 @@ int main(int argc, char *argv[])
         event_init();
 
         if (-1 == (fd = socket(AF_INET, SOCK_STREAM, 0))) perror("socket");
+
+        if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse))) perror("reuse");
+       
         if (bind(fd, (struct sockaddr*)&sin, sizeof(sin))) perror("bind");
         if (listen(fd, 1024)) perror("listen");
         if (setnonblock(fd)) printf("setnonblock error\n");

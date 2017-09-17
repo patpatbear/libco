@@ -38,7 +38,8 @@ endif
 COLIB_OBJS=co_epoll.o co_routine.o co_hook_sys_call.o coctx_swap.o coctx.o
 #co_swapcontext.o
 
-PROGS = colib example_poll example_echosvr example_echocli example_thread  example_cond example_specific example_copystack example_closure example_proxy
+PROGS = colib example_poll example_echosvr example_echocli example_thread  example_cond example_specific example_copystack example_closure example_proxy \
+		ev_echocli ev_echosvr
 
 all:$(PROGS)
 
@@ -89,12 +90,10 @@ EVENT = -I$(OPT)/include -L$(OPT)/lib -levent
 
 EVFLAGS = -g -fno-strict-aliasing -O2 -Wall -Wall -pipe -D_GNU_SOURCE -Wno-deprecated -m64
 
-ev: ev_echocli ev_echosvr ev_proxy
-
 ev_echocli: ev_echocli.c
 	gcc $^ $(EVENT) $(EVFLAGS)  -o $@
 	
-ev_echosvr: ev_echocli.c
+ev_echosvr: ev_echosvr.c
 	gcc $^ $(EVENT) $(EVFLAGS) -o $@ 
 
 ev_proxy: ev_proxy.c
