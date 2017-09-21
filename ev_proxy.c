@@ -10,8 +10,9 @@
 #include <string.h>
 #include <errno.h>
 
-#define DEBUG(...) printf(__VA_ARGS__)
-#define ERROR(...) do {fprintf(stderr, __VA_ARGS__); exit(1);}while(0)
+//#define DEBUG(...) printf(__VA_ARGS__)
+#define DEBUG(...) 
+#define ERROR(...) do {fprintf(stderr, __VA_ARGS__); pause();}while(0)
 
 static int iSuccCnt = 0;
 static int iFailCnt = 0;
@@ -89,34 +90,32 @@ void client_write_cb(int fd, short event, void *arg)
         for (;;) {
             ret = write(fd, rw->rspbuf, 8);
 
-            DEBUG("%d c<--: %s", i, rw->rspbuf);
-
             if (ret < 0) {
                 if (errno == EINTR) {
                     continue;
                 } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    break;
+                    goto end;
                 } else {
+                    ERROR("client write\n");
                     goto err;
                 }
             } else if (ret == 0) {
                 ERROR("write return 0 \n");
                 goto err;
             } else {
+                DEBUG("%d c<--: %s", i+1, rw->rspbuf);
                 break;
             }
         }
-
-        if (ret < 0) {
-            break;
-        }
     }
 
+end:
     rw->rspcnt -= i;
 
     return;
 
 err:
+    ERROR("client_write_cb");
     close(fd);
     event_del(rw->evrc);
     event_del(rw->evwc);
@@ -127,6 +126,7 @@ void client_read_cb(int fd, short event, void *arg)
     int ret = 0, cnt = 0;
     struct rw_arg *rw = arg;
 
+    DEBUG("---------------\n");
     DEBUG("evrc triggered: ");
 
     if (event & EV_READ) {
@@ -155,16 +155,17 @@ void client_read_cb(int fd, short event, void *arg)
         if (cnt > 0) {
             rw->reqcnt += cnt;
             event_add(rw->evws, NULL);
+            DEBUG("evws added\n");
         }
     }
 
     return ;
 
 err:
-    ERROR("close %d\n", fd);
-    close(fd);
+    DEBUG("client_read_cb");
     event_del(rw->evrc);
     event_del(rw->evwc);
+    close(fd);
     return;
 }
 
@@ -188,29 +189,29 @@ void svr_write_cb(int fd, short event, void *arg)
                 if (errno == EINTR) {
                     continue;
                 } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    break;
+                    goto end;
                 } else {
+                    ERROR("svr write\n");
                     goto err;
                 }
             } else if (ret == 0) {
                 ERROR("write return 0 \n");
                 goto err;
             } else {
-                DEBUG("%d -->s: %s", i, rw->reqbuf);
+                DEBUG("%d -->s: %s", i+1, rw->reqbuf);
                 break;
             }
         }
-
-        if (ret < 0) {
-            break;
-        }
     }
+
+end:
 
     rw->reqcnt -= i;
 
     return;
 
 err:
+    ERROR("svr_write_cb\n");
     close(fd);
     event_del(rw->evws);
     event_del(rw->evrs);
@@ -242,23 +243,24 @@ void svr_read_cb(int fd, short event, void *arg)
             } else {
                 AddSuccCnt();
                 cnt++;
-                DEBUG("%d s<--: %s ", cnt, rw->rspbuf);
+                DEBUG("%d s<--: %s", cnt, rw->rspbuf);
             }
         }
 
         if (cnt > 0) {
             rw->rspcnt += cnt;
             event_add(rw->evwc, NULL);
+            DEBUG("evwc added\n");
         }
     }
 
     return ;
 
 err:
-    ERROR("closed:%d\n", fd);
-    close(fd);
+    DEBUG("svr_read_cb\n");
     event_del(rw->evrs);
     event_del(rw->evws);
+    close(fd);
     return ;
 
 }
@@ -303,7 +305,7 @@ void accept_cb(int fd, short event, void *arg)
         if (setnonblock(cfd)) perror("setnonblock"); 
         if (setnonblock(sfd)) perror("setnonblock");
 
-        rw = calloc(1, sizeof(struct event));
+        rw = calloc(1, sizeof(struct rw_arg));
         evwc = calloc(1, sizeof(struct event));
         evrc = calloc(1, sizeof(struct event));
         evws = calloc(1, sizeof(struct event));

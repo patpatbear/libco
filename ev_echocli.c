@@ -10,15 +10,21 @@
 #include <string.h>
 #include <errno.h>
 
-static int iSuccCnt = 0;
-static int iFailCnt = 0;
-static int iTime = 0;
 
-void AddSuccCnt()
+#define DEBUG(...) printf(__VA_ARGS__)
+#define INFO(...)  printf(__VA_ARGS__)
+#define ERROR(...) do {printf(__VA_ARGS__); pause();} while(0)
+
+
+void AddReadCnt()
 {
+    static int iSuccCnt = 0;
+    static int iFailCnt = 0;
+    static int iTime = 0;
+
 	int now = time(NULL);
 	if (now >iTime) {
-		printf("time %d Succ Cnt %d Fail Cnt %d\n", iTime, iSuccCnt, iFailCnt);
+		printf("Read: Succ %d Fail %d\n", iSuccCnt, iFailCnt);
 		iTime = now;
 		iSuccCnt = 0;
 		iFailCnt = 0;
@@ -27,65 +33,64 @@ void AddSuccCnt()
 	}
 }
 
-void AddFailCnt()
+void AddWriteCnt()
 {
+    static int iSuccCnt = 0;
+    static int iFailCnt = 0;
+    static int iTime = 0;
+
 	int now = time(NULL);
 	if (now >iTime) {
-		printf("time %d Succ Cnt %d Fail Cnt %d\n", iTime, iSuccCnt, iFailCnt);
+		printf("Write: Succ %d Fail %d\n", iSuccCnt, iFailCnt);
 		iTime = now;
 		iSuccCnt = 0;
 		iFailCnt = 0;
 	} else {
-        iFailCnt++;
+		iSuccCnt++;
 	}
 }
 
-void read_write_cb(int fd, short event, void *arg)
+/* 
+ * 在做性能测试的时候应该公平模拟客户端的行为：
+ * 客户端）while(write->read)
+ * 服务端）while(write); while(read)
+ * libevent要实现write->read这种类似于同步的行为
+ * 最好还是通过读写cb拆分的形式进行。
+ */
+
+struct rw_arg {
+    struct event *evr;
+    struct event *evw;
+    int fd;
+    char buf[8];
+};
+
+
+void read_cb(int fd, short event, void *arg)
 {
-    int ret = 0;
-    struct event *ev = arg;
-	char str[8]="sarlmol";
-	char buf[ 1024 * 16 ];
+    int ret;
+    struct rw_arg *rw = arg;
 
-    if (event & EV_READ) {
-        for (;;) {
-            ret = read(fd, buf, sizeof(buf));
-            if (ret < 0) {
-                if (errno == EINTR) {
-                    continue;
-                } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    break;
-                } else {
-                    perror("read");
-                    goto err;
-                }
-            } else if (ret == 0) {
-                printf("connection closed\n");
-                goto err;
+    for (;;) {
+        ret = read(fd, rw->buf, sizeof(rw->buf));
+        if (ret < 0) {
+            if (errno == EINTR) {
+                DEBUG("read intr");
+                continue;
+            } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                printf("read done\n");
+                break;
             } else {
-                AddSuccCnt();//由于每次可能read的大小不为8，导致统计不准确
-            }
-        }
-    }
-
-    if (event & EV_WRITE) {
-        for (;;) {
-            ret = write(fd, str, sizeof(buf));
-            if (ret < 0) {
-                if (errno == EINTR) {
-                    continue;
-                } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    break;
-                } else {
-                    perror("write");
-                    goto err;
-                }
-            } else if (ret == 0) {
-                perror("write return 0");
+                ERROR("read");
                 goto err;
-            } else {
-                (void)0;
             }
+        } else if (ret == 0) {
+            INFO("connection closed\n");
+            goto err;
+        } else {
+            AddReadCnt();
+            event_add(rw->evw, NULL);
+            break;
         }
     }
 
@@ -93,18 +98,74 @@ void read_write_cb(int fd, short event, void *arg)
 
 err:
     close(fd);
-    event_del(ev);
+}
+
+void write_cb(int fd, short event, void *arg)
+{
+    int ret = 0;
+    struct rw_arg *rw = arg;
+	char str[8]="sarlmol";
+
+    for (;;) {
+        ret = write(fd, str, 8);
+        if (ret < 0) {
+            if (errno == EINTR) {
+                INFO("EINTR\n");
+                continue;
+            } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                /*
+                 * 127.0.0.1的write效率很高, read效率更高, TPS能到400W左右
+                 * 如果一直for循环写，其实svr已经read完成，所以不会EAGAIN
+                 * 综上：write EAGAIN不是很经常发生的
+                 */
+                INFO("write done\n");
+                break;
+            } else {
+                ERROR("write error\n");
+                goto err;
+            }
+        } else if (ret == 0) {
+            ERROR("write return 0");
+            goto err;
+        } else {
+            AddWriteCnt();
+            event_add(rw->evr, NULL);
+            break;
+        }
+    }
+
+    return ;
+
+err:
+    close(fd);
     return ;
 }
 
+static int setnonblock(int fd)
+{
+    int flags;
+    if (fd < 0) {
+        return -1;
+    }
+
+    flags = fcntl(fd, F_GETFL, 0);
+    flags |= O_NONBLOCK;
+    flags |= O_NDELAY;
+
+    if (fcntl(fd, F_SETFL, flags)) {
+        perror("setnonblock");
+        return -1;
+    }
+
+    return 0;
+}
 
 int main(int argc, char *argv[])
 {
     int i, j, fd, nproc, ncon, port;
-    int flags;
-    struct event *ev;
     pid_t pid;
     struct sockaddr_in sin;
+    struct rw_arg *rw;
 
     if (argc != 5) {
         printf("Usage: %s <ip> <port> <ncon> <nroc>\n", argv[0]);
@@ -118,6 +179,7 @@ int main(int argc, char *argv[])
     sin.sin_port = htons(port);
     sin.sin_addr.s_addr = inet_addr(argv[1]);
 
+    event_init();
 
     for (i = 0; i < nproc; ++i) {
         pid = fork();
@@ -125,32 +187,29 @@ int main(int argc, char *argv[])
             printf("forked %d \n", pid);
             continue;
         }
+
         if (pid < 0) {
             printf("fork fail\n");
             return -1;
         }
 
-        event_init();
-
         for (j = 0; j < ncon; ++j) {
             if (-1 == (fd = socket(AF_INET, SOCK_STREAM, 0))) perror("socket");
             if (connect(fd, (struct sockaddr*)&sin, sizeof(sin))) perror("connect");
+            if (setnonblock(fd)) ERROR("setnonblock\n");
 
-            flags = fcntl(fd, F_GETFL, 0);
-            flags |= O_NONBLOCK;
-            flags |= O_NDELAY;
-            if (fcntl(fd, F_SETFL, flags)) perror("fcntl");
+            rw = calloc(1, sizeof(struct rw_arg));
+            rw->evr = calloc(1, sizeof(struct event));
+            rw->evw = calloc(1, sizeof(struct event));
 
-            ev = calloc(1, sizeof(struct event));
-            event_set(ev, fd, EV_READ|EV_WRITE|EV_PERSIST, read_write_cb, ev);
-
-            event_add(ev, NULL);
-
-            printf("added ev %d\n", fd);
+            event_set(rw->evr, fd, EV_READ, read_cb, rw);
+            event_set(rw->evw, fd, EV_WRITE, write_cb, rw);
+            event_add(rw->evw, NULL);
         }
 
         event_dispatch();
     }
+
     wait(NULL);
     return 0;
 }

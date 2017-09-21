@@ -91,7 +91,7 @@ EVENT = -I$(OPT)/include -L$(OPT)/lib -levent
 EVFLAGS = -g -fno-strict-aliasing -O2 -Wall -Wall -pipe -D_GNU_SOURCE -Wno-deprecated -m64
 
 ev_echocli: ev_echocli.c
-	gcc $^ $(EVENT) $(EVFLAGS)  -o $@
+	gcc $^ $(EVENT) $(EVFLAGS) -o $@
 	
 ev_echosvr: ev_echosvr.c
 	gcc $^ $(EVENT) $(EVFLAGS) -o $@ 

@@ -71,7 +71,7 @@ static void *accept_routine(void *arg)
             continue;
         }
         printf("accepted\n");
-        usleep(5000);
+        //usleep(5000);
 
         w = wq->tqh_first;
         if (w) {
@@ -105,7 +105,7 @@ static int pre_connect_svr(struct sockaddr_in *sin)
 static void *proxy_routine(void *arg)
 {
     int nr, nw;
-    char buf[1024];
+    char buf[8];
     struct worker *w;
 
     w = (struct worker*)arg;
@@ -256,4 +256,3 @@ int main(int argc, char *argv[])
 
     wait(NULL);
 }
-
