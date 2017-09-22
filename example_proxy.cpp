@@ -9,7 +9,8 @@
 #include <errno.h>
 #include "co_routine.h"
 
-#define DEBUG(...) printf(__VA_ARGS__)
+//#define DEBUG(...) printf(__VA_ARGS__)
+#define DEBUG(...)
 #define INFO(...) printf(__VA_ARGS__)
 #define ERROR(...) printf(__VA_ARGS__)
 /* proxy for echosvr & echocli */
@@ -54,6 +55,21 @@ void AddFailCnt()
 	}
 }
 
+int setnonblock(int fd)
+{
+    int flags;
+
+    if (fd < 0 ) return -1;
+
+    flags = fcntl(fd, F_GETFL, 0);
+    flags |= O_NONBLOCK;
+    if (fcntl(fd, F_SETFL, flags)) {
+        perror("fcntl");
+        return -1;
+    }
+    return 0;
+}
+
 int co_accept(int fd, struct sockaddr *addr, socklen_t *len );
 static void *accept_routine(void *arg)
 {
@@ -75,6 +91,9 @@ static void *accept_routine(void *arg)
         }
         printf("accepted\n");
         //usleep(5000);
+        if (setnonblock(cfd)) {
+            ERROR("setnonblock\n");
+        }
 
         w = wq->tqh_first;
         if (w) {
@@ -108,6 +127,10 @@ static int pre_connect_svr(struct sockaddr_in *sin)
     return sfd;
 }
 
+
+/* sfd & cfd 都是user nonblock
+ * user nonblock的fd 调用的网络API都是系统的，并没有hook
+ * */
 static void *proxy_routine(void *arg)
 {
     int nr, nw;
@@ -127,6 +150,7 @@ static void *proxy_routine(void *arg)
     }
 
     for (;;) {
+restart:
         if (w->sfd < 0 || w->cfd < 0) {
             printf("proxy PANIC! \n");
             TAILQ_INSERT_HEAD(wq, w, w_tqe);
@@ -134,43 +158,92 @@ static void *proxy_routine(void *arg)
             continue;
         }
 
-        nr = read(w->cfd, buf, sizeof(buf));
-        if (nr <= 0) {
-            printf("client closed\n");
-            close(w->cfd), w->cfd = -1;
-            TAILQ_INSERT_HEAD(wq, w, w_tqe);
-            co_yield_ct();
-            continue;
+        for (;;) {
+            nr = read(w->cfd, buf, sizeof(buf));
+            if (nr < 0 && errno == EINTR) {
+                continue;
+            } else if (nr < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                struct pollfd pf = {0};
+                pf.fd = w->cfd;
+                pf.events = (POLLIN|POLLERR|POLLHUP);
+                co_poll(co_get_epoll_ct(), &pf, 1, -1);
+                continue;
+            } else if (nr <= 0) {
+                printf("client closed\n");
+                close(w->cfd), w->cfd = -1;
+                TAILQ_INSERT_HEAD(wq, w, w_tqe);
+                co_yield_ct();
+                goto restart;
+            } else {
+                DEBUG("-->c\n");
+                break;
+            }
         }
-        //printf("c->p\n");
 
-        nw = write(w->sfd, buf, nr);
-        if (nw <= 0) {
-            printf("svr closed, co exit\n");
-            close(w->cfd), w->cfd = -1;
-            close(w->sfd), w->sfd = -1;
-            break;
+        for (;;) {
+            nw = write(w->sfd, buf, nr);
+            if (nw < 0 && errno == EINTR) {
+                continue;
+            } else if (nw < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                struct pollfd pf;
+                pf.fd = w->sfd;
+                pf.events = (POLLOUT|POLLERR|POLLHUP);
+                co_poll(co_get_epoll_ct(), &pf, 1, -1);
+                continue;
+            } else if (nw <= 0) {
+                printf("svr closed, co exit\n");
+                close(w->cfd), w->cfd = -1;
+                close(w->sfd), w->sfd = -1;
+                goto restart;
+            } else {
+                DEBUG("-->s\n");
+                break;
+            }
         }
-        //printf("p->s\n");
 
-        nr = read(w->sfd, buf, sizeof(buf));
-        if (nr <= 0) {
-            printf("svr closed, co exit\n");
-            close(w->cfd), w->cfd = -1;
-            close(w->sfd), w->sfd = -1;
-            break;
+        for (;;) {
+            nr = read(w->sfd, buf, sizeof(buf));
+            if (nr < 0 && errno == EINTR) {
+                continue;
+            } else if (nr < 0 && (errno == EWOULDBLOCK||errno == EAGAIN)) {
+                struct pollfd pf;
+                pf.fd = w->sfd;
+                pf.events = (POLLIN|POLLHUP|POLLERR);
+                co_poll(co_get_epoll_ct(), &pf, 1, -1);
+                continue;
+            } else if (nr <= 0) {
+                printf("svr closed, co exit\n");
+                close(w->cfd), w->cfd = -1;
+                close(w->sfd), w->sfd = -1;
+                co_yield_ct();
+                goto restart;
+            } else {
+                DEBUG("s<--\n");
+                break;
+            }
         }
-        //printf("p<-s\n");
 
-        nw = write(w->cfd, buf, nr);
-        if (nw <= 0) {
-            printf("client closed\n");
-            close(w->cfd), w->cfd = -1;
-            TAILQ_INSERT_HEAD(wq, w, w_tqe);
-            co_yield_ct();
-            continue;
+        for (;;) {
+            nw = write(w->cfd, buf, nr);
+            if (nw < 0 && errno == EINTR) {
+                continue;
+            } else if (nw < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                struct pollfd pf;
+                pf.fd = w->cfd;
+                pf.events = (POLLOUT|POLLERR|POLLHUP);
+                co_poll(co_get_epoll_ct(), &pf, 1, -1);
+                continue;
+            } else if (nw <= 0) {
+                printf("client closed\n");
+                close(w->cfd), w->cfd = -1;
+                TAILQ_INSERT_HEAD(wq, w, w_tqe);
+                co_yield_ct();
+                continue;
+            } else {
+                DEBUG("c<--\n");
+                break;
+            }
         }
-        //printf("c<-p\n");
     }
 
     (void)nw;
@@ -183,6 +256,14 @@ static void *dummy_routine(void *arg)
     return NULL;
 }
 
+
+/* 
+ * 总体上来看，main函数中co_create，尝试enable_hook_sys是一个非常
+ * 糟糕的尝试
+ *
+ * 从范例和实际体验下来看，几乎只能再co中enable_hook_sys，并且一般
+ * fd都是user_nonblock的，所以能用到的hook真的很少！
+ */
 int main(int argc, char *argv[])
 {
     int i, nco, lport, sport, nproc;
@@ -243,12 +324,15 @@ int main(int argc, char *argv[])
         } else if (pid < 0) break;
 
         /* fork 之后再enable就会出现core */
-        co_create(&co, NULL, dummy_routine, NULL);
-        co_enable_hook_sys();
+        //co_create(&co, NULL, dummy_routine, NULL);
+        //co_enable_hook_sys(); 
         /* pre connect svr */
         for (i = 0; i < nco; ++i) {
             ws[i].cfd = -1;
             ws[i].sfd = pre_connect_svr(&sins);
+            if (setnonblock(ws[i].sfd)) {
+                ERROR("setnonblock\n");
+            }
         }
 
         printf("pre connect done\n");
