@@ -9,6 +9,9 @@
 #include <errno.h>
 #include "co_routine.h"
 
+#define DEBUG(...) printf(__VA_ARGS__)
+#define INFO(...) printf(__VA_ARGS__)
+#define ERROR(...) printf(__VA_ARGS__)
 /* proxy for echosvr & echocli */
 
 struct worker {
@@ -93,8 +96,11 @@ static int pre_connect_svr(struct sockaddr_in *sin)
 {
     int sfd, ret;
 
+    DEBUG("1.\n");
     sfd = socket(AF_INET, SOCK_STREAM, 0);
+    DEBUG("2.\n");
     ret = connect(sfd, (struct sockaddr*)sin, sizeof(struct sockaddr_in));
+    DEBUG("3.\n");
     if (ret != 0) {
         printf("pre_connect_svr fail \n");
         close(sfd);
@@ -111,6 +117,14 @@ static void *proxy_routine(void *arg)
     w = (struct worker*)arg;
 
     co_enable_hook_sys();
+
+    if (!(fcntl(w->sfd,F_GETFL, 0) & O_NONBLOCK)) {
+        ERROR("sfd block\n");
+    }
+
+    if (!(fcntl(w->cfd,F_GETFL, 0) & O_NONBLOCK)) {
+        ERROR("cfd block\n");
+    }
 
     for (;;) {
         if (w->sfd < 0 || w->cfd < 0) {
@@ -201,7 +215,6 @@ int main(int argc, char *argv[])
 
     /* enable main co, otherwise enable_hook_sys would not work */
     co_create(&co, NULL, dummy_routine, NULL);
-    
     co_enable_hook_sys();
 
     /* listen */
@@ -229,6 +242,9 @@ int main(int argc, char *argv[])
             continue;
         } else if (pid < 0) break;
 
+        /* fork 之后再enable就会出现core */
+        co_create(&co, NULL, dummy_routine, NULL);
+        co_enable_hook_sys();
         /* pre connect svr */
         for (i = 0; i < nco; ++i) {
             ws[i].cfd = -1;
