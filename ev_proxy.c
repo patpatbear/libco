@@ -12,6 +12,8 @@
 
 //#define DEBUG(...) printf(__VA_ARGS__)
 #define DEBUG(...) 
+#define INFO(...) printf(__VA_ARGS__)
+#define WARN(...) printf(__VA_ARGS__)
 #define ERROR(...) do {fprintf(stderr, __VA_ARGS__); pause();}while(0)
 
 static int iSuccCnt = 0;
@@ -68,9 +70,9 @@ struct rw_arg {
     int sfd;
     int cfd;
     int reqcnt;
-    char reqbuf[1024];
+    char reqbuf[8];
     int rspcnt;
-    char rspbuf[1024];
+    char rspbuf[8];
     int svr_connected;
 };
 
@@ -96,7 +98,7 @@ void client_write_cb(int fd, short event, void *arg)
                 } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     goto end;
                 } else {
-                    ERROR("client write\n");
+                    perror("client write\n");
                     goto err;
                 }
             } else if (ret == 0) {
@@ -271,7 +273,9 @@ void svr_connected_cb(int fd, short event, void *arg)
     socklen_t len = sizeof(err);
     struct rw_arg *rw = arg;
 
-    DEBUG("connect triggered: %d\n", fd);
+    static int conn_cnt = 1;
+
+    DEBUG("svr_connected_cb: %d, total %d\n", fd, conn_cnt++);
 
     if (event & EV_WRITE) {
         if (getsockopt(fd, SOL_SOCKET, SO_ERROR,&err, &len)) perror("getsockopt");
@@ -291,6 +295,10 @@ void accept_cb(int fd, short event, void *arg)
     struct event *evrc, *evwc, *evws, *evrs;
     struct accept_arg *aa = arg;
     struct rw_arg *rw;
+    
+    static int accept_cnt = 1;
+
+    DEBUG("accept_cb: %d, total %d\n", fd, accept_cnt++);
 
     if (event & EV_READ) {
         if (-1 == (cfd = accept(fd, NULL, NULL))) {
@@ -311,8 +319,6 @@ void accept_cb(int fd, short event, void *arg)
         evws = calloc(1, sizeof(struct event));
         evrs = calloc(1, sizeof(struct event));
 
-
-        /* evwc can be write event */
         event_set(evrs, sfd, EV_READ|EV_PERSIST, svr_read_cb, rw);
         event_set(evrc, cfd, EV_READ|EV_PERSIST, client_read_cb, rw);
         event_set(evwc, cfd, EV_WRITE, client_write_cb, rw);
@@ -400,7 +406,6 @@ int main(int argc, char *argv[])
     if (bind(fd, (struct sockaddr*)&laddr, sizeof(laddr))) perror("bind");
     if (listen(fd, 1024)) perror("listen");
     if (setnonblock(fd)) ERROR("setnonblock error\n");
-    DEBUG("1\n");
 
     eva = calloc(1, sizeof(struct event));
 

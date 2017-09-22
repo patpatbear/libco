@@ -85,11 +85,11 @@ static void *accept_routine(void *arg)
             pfd.fd = lfd;
             pfd.events = (POLLIN|POLLERR|POLLHUP);
             pfd.revents = 0;
-            printf("accepting.\n");
+            //printf("accepting.\n");
             co_poll(co_get_epoll_ct(), &pfd, 1, -1);
             continue;
         }
-        printf("accepted\n");
+        //printf("accepted\n");
         //usleep(5000);
         if (setnonblock(cfd)) {
             ERROR("setnonblock\n");

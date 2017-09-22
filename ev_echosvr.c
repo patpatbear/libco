@@ -189,7 +189,7 @@ void accept_cb(int fd, short event, void *arg)
 
         event_add(rw->evr, NULL);
 
-        printf("accept fd %d suc\n", afd);
+        DEBUG("accept fd %d suc\n", afd);
     }
 
     if (event & (~EV_READ)) {

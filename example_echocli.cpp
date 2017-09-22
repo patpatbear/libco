@@ -123,7 +123,7 @@ static void *readwrite_routine( void *arg )
 				struct pollfd pf = { 0 };
 				pf.fd = fd;
 				pf.events = (POLLOUT|POLLERR|POLLHUP);
-				co_poll( co_get_epoll_ct(),&pf,1,200);
+				co_poll( co_get_epoll_ct(),&pf,1,-1);
 				//check connect
 				int error = 0;
 				uint32_t socklen = sizeof(error);
@@ -131,7 +131,7 @@ static void *readwrite_routine( void *arg )
 				ret = getsockopt(fd, SOL_SOCKET, SO_ERROR,(void *)&error,  &socklen);
 				if ( ret == -1 ) 
 				{       
-					//printf("getsockopt ERROR ret %d %d:%s\n", ret, errno, strerror(errno));
+                    printf("getsockopt ERROR ret %d %d:%s\n", ret, errno, strerror(errno));
 					close(fd);
 					fd = -1;
 					AddFailCnt();
@@ -140,7 +140,7 @@ static void *readwrite_routine( void *arg )
 				if ( error ) 
 				{       
 					errno = error;
-					//printf("connect ERROR ret %d %d:%s\n", error, errno, strerror(errno));
+                    printf("connect ERROR ret %d %d:%s\n", error, errno, strerror(errno));
 					close(fd);
 					fd = -1;
 					AddFailCnt();
@@ -156,8 +156,8 @@ static void *readwrite_routine( void *arg )
 			ret = read( fd,buf, sizeof(buf) );
 			if ( ret <= 0 )
 			{
-				//printf("co %p read ret %d errno %d (%s)\n",
-				//		co_self(), ret,errno,strerror(errno));
+				printf("co %p read ret %d errno %d (%s)\n",
+						co_self(), ret,errno,strerror(errno));
 				close(fd);
 				fd = -1;
 				AddFailCnt();
@@ -170,8 +170,8 @@ static void *readwrite_routine( void *arg )
 		}
 		else
 		{
-			//printf("co %p write ret %d errno %d (%s)\n",
-			//		co_self(), ret,errno,strerror(errno));
+			printf("co %p write ret %d errno %d (%s)\n",
+					co_self(), ret,errno,strerror(errno));
 			close(fd);
 			fd = -1;
 			AddFailCnt();
